@@ -1,0 +1,284 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <EEPROM.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// Configuración de la pantalla OLED
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define OLED_SDA 21
+#define OLED_SCL 22
+
+// Configuración del joystick
+#define JOYSTICK_X 34
+#define JOYSTICK_Y 35
+#define JOYSTICK_SW 32
+
+// Variables del juego
+int playerX = SCREEN_WIDTH / 2; // Posición inicial de la nave en X
+int bulletX = -1, bulletY = -1;  // Posición inicial de la bala
+bool bulletFired = false;        // Estado de la bala
+int enemyX = random(0, SCREEN_WIDTH - 8); // Posición inicial del enemigo
+int enemyY = 0;                  // Posición inicial del enemigo en Y
+int score = 0;                   // Puntaje
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+WebServer server(80);
+
+String leerStringDeEEPROM(int direccion)
+{
+    String cadena = "";
+    char caracter = EEPROM.read(direccion);
+    int i = 0;
+    while (caracter != '\0' && i < 100)
+    {
+        cadena += caracter;
+        i++;
+        caracter = EEPROM.read(direccion + i);
+    }
+    return cadena;
+}
+
+void escribirStringEnEEPROM(int direccion, String cadena)
+{
+    int longitudCadena = cadena.length();
+    for (int i = 0; i < longitudCadena; i++)
+    {
+        EEPROM.write(direccion + i, cadena[i]);
+    }
+    EEPROM.write(direccion + longitudCadena, '\0');
+    EEPROM.commit();
+}
+
+void handleRoot()
+{
+    String html = "<html><body>";
+    html += "<form method='POST' action='/wifi'>";
+    html += "Red Wi-Fi: <input type='text' name='ssid'><br>";
+    html += "Contraseña: <input type='password' name='password'><br>";
+    html += "<input type='submit' value='Conectar'>";
+    html += "</form></body></html>";
+    server.send(200, "text/html", html);
+}
+
+int posW = 50;
+void handleWifi()
+{
+    String ssid = server.arg("ssid");
+    String password = server.arg("password");
+    Serial.print("Conectando a la red Wi-Fi ");
+    Serial.println(ssid);
+    Serial.print("Clave Wi-Fi ");
+    Serial.println(password);
+    WiFi.disconnect();
+    WiFi.begin(ssid.c_str(), password.c_str(), 6);
+
+    int cnt = 0;
+    while (WiFi.status() != WL_CONNECTED && cnt < 8)
+    {
+        delay(1000);
+        Serial.print(".");
+        cnt++;
+    }
+
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        Serial.print("Guardando en memoria EEPROM...");
+        String varsave = leerStringDeEEPROM(300);
+        posW = (varsave == "a") ? 0 : 50;
+        escribirStringEnEEPROM(300, (varsave == "a") ? "b" : "a");
+        escribirStringEnEEPROM(0 + posW, ssid);
+        escribirStringEnEEPROM(100 + posW, password);
+
+        Serial.println("Conexión establecida");
+        server.send(200, "text/plain", "Conexión establecida");
+    }
+    else
+    {
+        Serial.println("Conexión no establecida");
+        server.send(200, "text/plain", "Conexión no establecida");
+    }
+}
+
+bool lastRed()
+{
+    for (int psW = 0; psW <= 50; psW += 50)
+    {
+        String usu = leerStringDeEEPROM(0 + psW);
+        String cla = leerStringDeEEPROM(100 + psW);
+        WiFi.disconnect();
+        WiFi.begin(usu.c_str(), cla.c_str(), 6);
+        int cnt = 0;
+        while (WiFi.status() != WL_CONNECTED && cnt < 5)
+        {
+            delay(1000);
+            Serial.print(".");
+            cnt++;
+        }
+        if (WiFi.status() == WL_CONNECTED)
+        {
+            Serial.println("Conectado a Red Wifi");
+            return true;
+        }
+    }
+    return false;
+}
+
+void initAP(const char *apSsid, const char *apPassword)
+{
+    Serial.begin(115200);
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(apSsid, apPassword);
+    server.on("/", handleRoot);
+    server.on("/wifi", handleWifi);
+    server.begin();
+    Serial.println("Servidor web iniciado");
+}
+
+void loopAP()
+{
+    server.handleClient();
+}
+
+void intentoconexion(const char *apname, const char *appassword)
+{
+    Serial.begin(115200);
+    EEPROM.begin(512);
+    if (!lastRed())
+    {
+        Serial.println("Conectarse desde su celular a la red creada en 192.168.4.1");
+        initAP(apname, appassword);
+    }
+    while (WiFi.status() != WL_CONNECTED)
+    {
+        loopAP();
+    }
+}
+
+void drawPlayer()
+{
+    display.fillRect(playerX, SCREEN_HEIGHT - 10, 8, 8, SSD1306_WHITE);
+}
+
+void drawBullet()
+{
+    if (bulletFired)
+    {
+        display.fillRect(bulletX, bulletY, 2, 4, SSD1306_WHITE);
+    }
+}
+
+void drawEnemy()
+{
+    display.fillRect(enemyX, enemyY, 8, 8, SSD1306_WHITE);
+}
+
+void movePlayer()
+{
+    int xValue = analogRead(JOYSTICK_X);
+    if (xValue < 1000)
+    {
+        playerX -= 2;
+        if (playerX < 0)
+            playerX = 0;
+    }
+    else if (xValue > 3000)
+    {
+        playerX += 2;
+        if (playerX > SCREEN_WIDTH - 8)
+            playerX = SCREEN_WIDTH - 8;
+    }
+}
+
+void fireBullet()
+{
+    if (!bulletFired)
+    {
+        bulletX = playerX + 3;
+        bulletY = SCREEN_HEIGHT - 12;
+        bulletFired = true;
+    }
+}
+
+void moveBullet()
+{
+    if (bulletFired)
+    {
+        bulletY -= 4;
+        if (bulletY < 0)
+        {
+            bulletFired = false;
+        }
+    }
+}
+
+void moveEnemy()
+{
+    enemyY += 1;
+    if (enemyY > SCREEN_HEIGHT)
+    {
+        enemyY = 0;
+        enemyX = random(0, SCREEN_WIDTH - 8);
+    }
+}
+
+void checkCollision()
+{
+    if (bulletFired && bulletX >= enemyX && bulletX <= enemyX + 8 && bulletY <= enemyY + 8 && bulletY >= enemyY)
+    {
+        bulletFired = false;
+        enemyY = 0;
+        enemyX = random(0, SCREEN_WIDTH - 8);
+        score++;
+    }
+}
+
+void displayScore()
+{
+    display.setCursor(0, 0);
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.print("Score: ");
+    display.print(score);
+}
+
+void setup()
+{
+    intentoconexion("ESP32_AP", "12345678");
+    Wire.begin(OLED_SDA, OLED_SCL);
+    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
+    {
+        Serial.println(F("SSD1306 allocation failed"));
+        for (;;)
+            ;
+    }
+    display.clearDisplay();
+    pinMode(JOYSTICK_SW, INPUT_PULLUP);
+}
+
+void loop()
+{
+    display.clearDisplay();
+
+    movePlayer();
+    if (digitalRead(JOYSTICK_SW) == LOW)
+    {
+        fireBullet();
+    }
+
+    moveBullet();
+    moveEnemy();
+    checkCollision();
+
+    drawPlayer();
+    drawBullet();
+    drawEnemy();
+    displayScore();
+
+    display.display();
+    delay(30);
+}
